@@ -1,0 +1,32 @@
+# Build artifacts
+build/
+dist/
+*.app/
+.eggs/
+*.egg-info/
+
+# Test and coverage
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Virtual environments
+venv/
+env/
+ENV/
