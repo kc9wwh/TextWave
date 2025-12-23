@@ -54,11 +54,48 @@ jobs:
           chmod +x .github/scripts/build-app.sh
           .github/scripts/build-app.sh
 
+      - name: Code sign and notarize app
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          chmod +x .github/scripts/sign-and-notarize.sh
+          .github/scripts/sign-and-notarize.sh
+
       - name: Create DMG
         if: steps.check_tag.outputs.exists == 'false'
         run: |
           chmod +x .github/scripts/create-dmg.sh
           .github/scripts/create-dmg.sh ${{ steps.get_version.outputs.version }}
+
+      - name: Sign DMG
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Reimport certificate for DMG signing
+          KEYCHAIN_PATH="$RUNNER_TEMP/dmg-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          chmod +x .github/scripts/sign-dmg.sh
+          .github/scripts/sign-dmg.sh ${{ steps.get_version.outputs.version }}
+
+          security delete-keychain "$KEYCHAIN_PATH" || true
+          rm -f "$CERT_PATH"
 
       - name: Create Release
         if: steps.check_tag.outputs.exists == 'false'
@@ -76,6 +113,8 @@ jobs:
 
             ### Installation
             Download `TextWave-${{ steps.get_version.outputs.version }}.dmg`, open it, and drag TextWave to your Applications folder.
+
+            ✅ **This release is code-signed and notarized by Apple** - no security warnings!
 
             ### Requirements
             - macOS 10.15 or later
