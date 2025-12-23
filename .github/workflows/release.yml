@@ -26,7 +26,7 @@ jobs:
       - name: Get version from code
         id: get_version
         run: |
-          VERSION=$(python -c "from pdf2mp3_gui import __version__; print(__version__)")
+          VERSION=$(grep -E "^__version__ = " pdf2mp3_gui.py | cut -d'"' -f2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=v$VERSION" >> $GITHUB_OUTPUT
 
