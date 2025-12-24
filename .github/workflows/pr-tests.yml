@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   test:
     runs-on: macos-latest
@@ -30,8 +34,24 @@ jobs:
           flake8 pdf2mp3_gui.py --max-line-length=120 --ignore=E203,W503 || true
 
       - name: Run unit tests
+        id: pytest
+        continue-on-error: true
         run: |
-          pytest tests/ -v --cov=pdf2mp3_gui --cov-report=xml --cov-report=term
+          set +e
+          pytest tests/ -v --cov=pdf2mp3_gui --cov-report=xml --cov-report=term | tee pytest-output.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          exit 0
+
+      - name: Extract coverage percentage
+        id: coverage
+        run: |
+          # Extract just the percentage number from coverage output
+          COVERAGE=$(grep "TOTAL" pytest-output.txt 2>/dev/null | awk '{print $NF}' | tr -d '%' || echo "0")
+          # Validate it's a number
+          if ! [[ "$COVERAGE" =~ ^[0-9]+$ ]]; then
+            COVERAGE="0"
+          fi
+          echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -42,7 +62,80 @@ jobs:
         continue-on-error: true
 
       - name: Test app builds
+        id: build
+        continue-on-error: true
         run: |
+          set +e
           python -m pip install py2app
           python setup.py py2app
           test -d dist/TextWave.app
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          exit 0
+
+      - name: Post test results comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pytest_exit = '${{ steps.pytest.outputs.exit_code }}' || '0';
+            const build_exit = '${{ steps.build.outputs.exit_code }}' || '0';
+            const coverage = '${{ steps.coverage.outputs.percentage }}' || '0';
+
+            // Determine overall status
+            const all_passed = pytest_exit === '0' && build_exit === '0';
+            const status_emoji = all_passed ? '✅' : '❌';
+            const status_text = all_passed ? 'Passed' : 'Failed';
+
+            // Create comment body
+            const comment_body = `## ${status_emoji} Test Results
+
+            **Status:** ${status_text}
+            **Coverage:** ${coverage}%
+
+            ### Test Summary
+            - **Linting:** ✅ flake8 checks completed
+            - **Unit Tests:** ${pytest_exit === '0' ? '✅ Passed' : '❌ Failed'}
+            - **Build Verification:** ${build_exit === '0' ? '✅ Passed' : '❌ Failed'}
+            - **Signing & Notarization:** ⏭️ Only on release (not tested in PRs)
+
+            [View full workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})
+
+            ---
+            *Last updated: ${new Date().toUTCString()}*
+            <!-- test-results-comment -->`;
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const bot_comment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('<!-- test-results-comment -->')
+            );
+
+            // Update or create comment
+            if (bot_comment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: bot_comment.id,
+                body: comment_body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment_body
+              });
+            }
+
+      - name: Fail workflow if tests failed
+        if: steps.pytest.outputs.exit_code != '0' || steps.build.outputs.exit_code != '0'
+        run: |
+          echo "Tests failed - failing workflow"
+          exit 1
