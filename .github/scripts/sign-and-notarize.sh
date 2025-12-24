@@ -87,25 +87,52 @@ fi
 
 log_info "Using signing identity: $SIGNING_IDENTITY"
 
-# Sign all executables and frameworks inside the app
-log_info "Signing embedded binaries and frameworks..."
-find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -exec codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime {} \;
+# Sign all binaries - must be done in correct order: deepest first
+log_info "Signing all binaries (this may take a few minutes)..."
 
-# Sign frameworks
-if [ -d "$APP_PATH/Contents/Frameworks" ]; then
-    find "$APP_PATH/Contents/Frameworks" -type d -name "*.framework" | while read framework; do
-        log_info "Signing framework: $(basename "$framework")"
-        codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$framework"
+# Step 1: Sign all .dylib and .so files
+log_info "Step 1/5: Signing .dylib and .so files..."
+find "$APP_PATH/Contents/Resources" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 | while IFS= read -r -d '' file; do
+    codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$file" 2>/dev/null || true
+done
+
+# Step 2: Sign all executables in MacOS directory (including Python)
+log_info "Step 2/5: Signing executables in MacOS directory..."
+find "$APP_PATH/Contents/MacOS" -type f -perm +111 -print0 | while IFS= read -r -d '' file; do
+    log_info "  Signing: $(basename "$file")"
+    codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$file" 2>/dev/null || true
+done
+
+# Step 3: Sign Qt/PyQt6 frameworks (must sign nested binaries first, then framework)
+log_info "Step 3/5: Signing Qt frameworks..."
+if [ -d "$APP_PATH/Contents/Resources/lib/python3.11/PyQt6/Qt6/lib" ]; then
+    find "$APP_PATH/Contents/Resources/lib/python3.11/PyQt6/Qt6/lib" -name "*.framework" -print0 | while IFS= read -r -d '' framework; do
+        # First sign any binaries inside the framework
+        find "$framework" -type f \( -name "*.dylib" -o -perm +111 \) -print0 | while IFS= read -r -d '' binary; do
+            codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$binary" 2>/dev/null || true
+        done
+        # Then sign the framework itself
+        log_info "  Signing framework: $(basename "$framework")"
+        codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$framework" 2>/dev/null || true
     done
 fi
 
-# Sign the main executable
-log_info "Signing main executable..."
+# Step 4: Sign any frameworks in Contents/Frameworks
+log_info "Step 4/5: Signing frameworks in Contents/Frameworks..."
+if [ -d "$APP_PATH/Contents/Frameworks" ]; then
+    find "$APP_PATH/Contents/Frameworks" -name "*.framework" -print0 | while IFS= read -r -d '' framework; do
+        log_info "  Signing framework: $(basename "$framework")"
+        codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$framework" 2>/dev/null || true
+    done
+fi
+
+# Step 5: Sign the main executable
+log_info "Step 5/5: Signing main executable..."
 codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS_PATH" \
     "$APP_PATH/Contents/MacOS/TextWave"
 
-# Sign the app bundle
+# Finally: Sign the app bundle itself
 log_info "Signing app bundle..."
 codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS_PATH" \
@@ -123,22 +150,42 @@ ditto -c -k --keepParent "$APP_PATH" "$NOTARIZATION_ZIP"
 
 # Submit for notarization
 log_info "Submitting to Apple notary service..."
-xcrun notarytool submit "$NOTARIZATION_ZIP" \
+NOTARIZATION_OUTPUT=$(xcrun notarytool submit "$NOTARIZATION_ZIP" \
     --apple-id "$APPLE_ID" \
     --password "$APPLE_APP_SPECIFIC_PASSWORD" \
     --team-id "$APPLE_TEAM_ID" \
     --wait \
-    --timeout 30m
+    --timeout 30m 2>&1)
 
-# Check notarization status
-NOTARIZATION_STATUS=$?
-if [ $NOTARIZATION_STATUS -ne 0 ]; then
-    log_error "Notarization failed"
+NOTARIZATION_EXIT_CODE=$?
+echo "$NOTARIZATION_OUTPUT"
+
+# Extract submission ID from output
+SUBMISSION_ID=$(echo "$NOTARIZATION_OUTPUT" | grep -o 'id: [a-f0-9-]*' | head -1 | cut -d' ' -f2)
+
+# Check if notarization was accepted
+if echo "$NOTARIZATION_OUTPUT" | grep -q "status: Accepted"; then
+    log_info "Notarization accepted!"
+elif echo "$NOTARIZATION_OUTPUT" | grep -q "status: Invalid"; then
+    log_error "Notarization was rejected by Apple!"
+    if [ -n "$SUBMISSION_ID" ]; then
+        log_error "Fetching detailed rejection log..."
+        xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" || true
+    fi
+    security delete-keychain "$KEYCHAIN_PATH" || true
+    exit 1
+elif [ $NOTARIZATION_EXIT_CODE -ne 0 ]; then
+    log_error "Notarization failed with exit code $NOTARIZATION_EXIT_CODE"
+    security delete-keychain "$KEYCHAIN_PATH" || true
+    exit 1
+else
+    log_error "Notarization status unclear - check output above"
     security delete-keychain "$KEYCHAIN_PATH" || true
     exit 1
 fi
-
-log_info "Notarization successful!"
 
 # Staple the notarization ticket
 log_info "Stapling notarization ticket..."
