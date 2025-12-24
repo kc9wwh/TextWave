@@ -198,7 +198,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🗺️ Roadmap
 
-- [ ] App signing and notarization
+- [X] App signing and notarization - _v0.6.0_
 - [ ] Custom regex support for text removal (i.e., Page 21)
 - [ ] Support for additional TTS voices
 - [ ] Support for other TTS providers
