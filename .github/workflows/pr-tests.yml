@@ -85,19 +85,19 @@ jobs:
             // Create comment body
             const comment_body = `## ${status_emoji} Test Results
 
-**Status:** ${status_text}
-**Coverage:** ${coverage}%
+            **Status:** ${status_text}
+            **Coverage:** ${coverage}%
 
-### Test Summary
-- **Linting:** ✅ flake8 checks completed
-- **Unit Tests:** ${pytest_exit === '0' ? '✅ Passed' : '❌ Failed'}
-- **Build Verification:** ${build_exit === '0' ? '✅ Passed' : '❌ Failed'}
+            ### Test Summary
+            - **Linting:** ✅ flake8 checks completed
+            - **Unit Tests:** ${pytest_exit === '0' ? '✅ Passed' : '❌ Failed'}
+            - **Build Verification:** ${build_exit === '0' ? '✅ Passed' : '❌ Failed'}
 
-[View full workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})
+            [View full workflow run](${context.payload.repository.html_url}/actions/runs/${context.runId})
 
----
-*Last updated: ${new Date().toUTCString()}*
-<!-- test-results-comment -->`;
+            ---
+            *Last updated: ${new Date().toUTCString()}*
+            <!-- test-results-comment -->`;
 
             // Find existing comment
             const { data: comments } = await github.rest.issues.listComments({
