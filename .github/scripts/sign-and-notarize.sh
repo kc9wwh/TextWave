@@ -117,9 +117,15 @@ if [ -d "$APP_PATH/Contents/Resources/lib/python3.11/PyQt6/Qt6/lib" ]; then
     done
 fi
 
-# Step 4: Sign any frameworks in Contents/Frameworks
-log_info "Step 4/5: Signing frameworks in Contents/Frameworks..."
+# Step 4: Sign Contents/Frameworks (both .dylib files and .framework bundles)
+log_info "Step 4/5: Signing Contents/Frameworks..."
 if [ -d "$APP_PATH/Contents/Frameworks" ]; then
+    # First sign all .dylib files
+    find "$APP_PATH/Contents/Frameworks" -type f -name "*.dylib" -print0 | while IFS= read -r -d '' dylib; do
+        log_info "  Signing dylib: $(basename "$dylib")"
+        codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$dylib" 2>/dev/null || true
+    done
+    # Then sign .framework bundles
     find "$APP_PATH/Contents/Frameworks" -name "*.framework" -print0 | while IFS= read -r -d '' framework; do
         log_info "  Signing framework: $(basename "$framework")"
         codesign --force --sign "$SIGNING_IDENTITY" --timestamp --options runtime "$framework" 2>/dev/null || true
