@@ -2,10 +2,7 @@ name: Build and Release
 
 on:
   push:
-    branches:
-      - main
-      - release/*
-      - kc9wwh-implement_code_signing
+    branches: [main]
     paths-ignore:
       - "**.md"
       - "docs/**"
