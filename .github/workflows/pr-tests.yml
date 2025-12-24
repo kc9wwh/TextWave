@@ -45,7 +45,12 @@ jobs:
       - name: Extract coverage percentage
         id: coverage
         run: |
-          COVERAGE=$(grep -oP 'TOTAL.*\K\d+(?=%)' pytest-output.txt 2>/dev/null || echo "0")
+          # Extract coverage percentage using sed (more portable than grep -P)
+          COVERAGE=$(grep "TOTAL" pytest-output.txt 2>/dev/null | sed -E 's/.*TOTAL[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+([0-9]+)%.*/\1/' || echo "0")
+          # Fallback: try alternative format if above didn't work
+          if [ "$COVERAGE" = "0" ] || [ -z "$COVERAGE" ]; then
+            COVERAGE=$(grep "TOTAL" pytest-output.txt 2>/dev/null | grep -o '[0-9]\+%' | head -1 | tr -d '%' || echo "0")
+          fi
           echo "percentage=$COVERAGE" >> $GITHUB_OUTPUT
 
       - name: Upload coverage to Codecov
