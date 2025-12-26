@@ -36,7 +36,7 @@ def get_resource_path(filename):
 try:
     import edge_tts
     from pypdf import PdfReader
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QEvent
+    from PyQt6.QtCore import QEvent, QSettings, Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 
     try:
@@ -364,14 +364,16 @@ class PDF2MP3App(QMainWindow):
 
         # Main Window
         if self.centralWidget():
-            self.centralWidget().setStyleSheet(f"background-color: {colors['window_bg']};")
+            self.centralWidget().setStyleSheet(
+                f"background-color: {colors['window_bg']};"
+            )
 
         # Subtitle
         if hasattr(self, "subtitle_label"):
             self.subtitle_label.setStyleSheet(f"""
                 QLabel {{
                     font-size: 14px;
-                    color: {colors['subtitle_color']};
+                    color: {colors["subtitle_color"]};
                     padding-bottom: 15px;
                     padding-top: 5px;
                 }}
@@ -381,12 +383,12 @@ class PDF2MP3App(QMainWindow):
         if hasattr(self, "drop_label"):
             self.drop_label.setStyleSheet(f"""
                 QLabel {{
-                    border: 3px dashed {colors['drop_border']};
+                    border: 3px dashed {colors["drop_border"]};
                     border-radius: 10px;
                     padding: 50px;
                     font-size: 18px;
-                    background-color: {colors['drop_bg']};
-                    color: {colors['drop_text']};
+                    background-color: {colors["drop_bg"]};
+                    color: {colors["drop_text"]};
                 }}
             """)
 
@@ -394,9 +396,9 @@ class PDF2MP3App(QMainWindow):
         if hasattr(self, "status_text"):
             self.status_text.setStyleSheet(f"""
                 QTextEdit {{
-                    background-color: {colors['log_bg']};
-                    color: {colors['log_text']};
-                    border: 1px solid {colors['log_border']};
+                    background-color: {colors["log_bg"]};
+                    color: {colors["log_text"]};
+                    border: 1px solid {colors["log_border"]};
                     border-radius: 4px;
                 }}
             """)
@@ -430,11 +432,11 @@ class PDF2MP3App(QMainWindow):
                         border: none;
                         font-size: 20px;
                         font-weight: bold;
-                        color: {colors['dismiss_btn']};
+                        color: {colors["dismiss_btn"]};
                         padding: 0px 5px;
                     }}
                     QPushButton:hover {{
-                        color: {colors['dismiss_btn_hover']};
+                        color: {colors["dismiss_btn_hover"]};
                     }}
                 """)
             # Ensure update/download buttons keep their specific styling if needed,
@@ -554,8 +556,8 @@ class PDF2MP3App(QMainWindow):
         banner = QWidget()
         banner.setStyleSheet(f"""
             QWidget {{
-                background-color: {colors['banner_update_bg']};
-                border: 1px solid {colors['banner_update_border']};
+                background-color: {colors["banner_update_bg"]};
+                border: 1px solid {colors["banner_update_border"]};
                 border-radius: 5px;
                 padding: 10px;
             }}
@@ -610,11 +612,11 @@ class PDF2MP3App(QMainWindow):
                 border: none;
                 font-size: 20px;
                 font-weight: bold;
-                color: {colors['dismiss_btn']};
+                color: {colors["dismiss_btn"]};
                 padding: 0px 5px;
             }}
             QPushButton:hover {{
-                color: {colors['dismiss_btn_hover']};
+                color: {colors["dismiss_btn_hover"]};
             }}
         """)
         dismiss_btn.clicked.connect(self.dismiss_update_banner)
@@ -713,8 +715,8 @@ class PDF2MP3App(QMainWindow):
         banner = QWidget()
         banner.setStyleSheet(f"""
             QWidget {{
-                background-color: {colors['banner_app_bg']};
-                border: 1px solid {colors['banner_app_border']};
+                background-color: {colors["banner_app_bg"]};
+                border: 1px solid {colors["banner_app_border"]};
                 border-radius: 5px;
                 padding: 10px;
             }}
@@ -766,11 +768,11 @@ class PDF2MP3App(QMainWindow):
                 border: none;
                 font-size: 20px;
                 font-weight: bold;
-                color: {colors['dismiss_btn']};
+                color: {colors["dismiss_btn"]};
                 padding: 0px 5px;
             }}
             QPushButton:hover {{
-                color: {colors['dismiss_btn_hover']};
+                color: {colors["dismiss_btn_hover"]};
             }}
         """)
         dismiss_btn.clicked.connect(self.dismiss_app_update_banner)
@@ -853,16 +855,24 @@ class PDF2MP3App(QMainWindow):
             return
 
         # Ask where to save
-        # Default to the same folder as the input PDF
-        default_path = Path(self.pdf_path).parent / (
-            Path(self.pdf_path).stem + ".mp3"
-        )
+        # Use last output directory if available, otherwise use input PDF's directory
+        last_output_dir = self.settings.value("last_output_dir", None)
+        if last_output_dir:
+            default_path = Path(last_output_dir) / (Path(self.pdf_path).stem + ".mp3")
+        else:
+            default_path = Path(self.pdf_path).parent / (
+                Path(self.pdf_path).stem + ".mp3"
+            )
+
         output_path, _ = QFileDialog.getSaveFileName(
             self, "Save MP3 As", str(default_path), "MP3 Files (*.mp3)"
         )
 
         if not output_path:
             return
+
+        # Save the output directory for next time
+        self.settings.setValue("last_output_dir", str(Path(output_path).parent))
 
         # Disable UI during conversion
         self.convert_btn.setEnabled(False)
