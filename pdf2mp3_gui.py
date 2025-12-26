@@ -36,7 +36,7 @@ def get_resource_path(filename):
 try:
     import edge_tts
     from pypdf import PdfReader
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QEvent
     from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 
     try:
@@ -60,7 +60,7 @@ try:
     )
 except ImportError as e:
     missing = str(e).split("'")[1] if "'" in str(e) else "dependencies"
-    print(f"Installing required dependencies...")
+    print("Installing required dependencies...")
     packages = ["edge-tts", "pypdf", "PyQt6"]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + packages)
     print("Dependencies installed. Please run the script again.\n")
@@ -318,13 +318,142 @@ class PDF2MP3App(QMainWindow):
         self.app_download_url = ""
         self.init_ui()
 
+    def get_theme_colors(self):
+        """Get color palette based on system theme."""
+        app = QApplication.instance()
+        is_dark = app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+
+        if is_dark:
+            return {
+                "window_bg": "#1e1e1e",
+                "subtitle_color": "#aaaaaa",
+                "drop_bg": "#2d2d2d",
+                "drop_border": "#00BCD4",
+                "drop_text": "#e0e0e0",
+                "log_bg": "#121212",
+                "log_text": "#e0e0e0",
+                "log_border": "#333333",
+                "banner_update_bg": "#0D47A1",
+                "banner_update_border": "#00BCD4",
+                "banner_app_bg": "#1B5E20",
+                "banner_app_border": "#4CAF50",
+                "dismiss_btn": "#aaaaaa",
+                "dismiss_btn_hover": "#ffffff",
+            }
+        else:
+            return {
+                "window_bg": "#f0f0f0",
+                "subtitle_color": "#666",
+                "drop_bg": "#f5f5f5",
+                "drop_border": "#00BCD4",
+                "drop_text": "#000000",
+                "log_bg": "#ffffff",
+                "log_text": "#000000",
+                "log_border": "#cccccc",
+                "banner_update_bg": "#E3F2FD",
+                "banner_update_border": "#00BCD4",
+                "banner_app_bg": "#E8F5E9",
+                "banner_app_border": "#4CAF50",
+                "dismiss_btn": "#666",
+                "dismiss_btn_hover": "#000",
+            }
+
+    def apply_theme(self):
+        """Apply current theme colors to all widgets."""
+        colors = self.get_theme_colors()
+
+        # Main Window
+        if self.centralWidget():
+            self.centralWidget().setStyleSheet(f"background-color: {colors['window_bg']};")
+
+        # Subtitle
+        if hasattr(self, "subtitle_label"):
+            self.subtitle_label.setStyleSheet(f"""
+                QLabel {{
+                    font-size: 14px;
+                    color: {colors['subtitle_color']};
+                    padding-bottom: 15px;
+                    padding-top: 5px;
+                }}
+            """)
+
+        # Drop Label
+        if hasattr(self, "drop_label"):
+            self.drop_label.setStyleSheet(f"""
+                QLabel {{
+                    border: 3px dashed {colors['drop_border']};
+                    border-radius: 10px;
+                    padding: 50px;
+                    font-size: 18px;
+                    background-color: {colors['drop_bg']};
+                    color: {colors['drop_text']};
+                }}
+            """)
+
+        # Log Window
+        if hasattr(self, "status_text"):
+            self.status_text.setStyleSheet(f"""
+                QTextEdit {{
+                    background-color: {colors['log_bg']};
+                    color: {colors['log_text']};
+                    border: 1px solid {colors['log_border']};
+                    border-radius: 4px;
+                }}
+            """)
+
+        # Update Banners if they exist
+        if self.update_banner:
+            self.update_banner_style(self.update_banner, colors, "update")
+        if self.app_update_banner:
+            self.update_banner_style(self.app_update_banner, colors, "app")
+
+    def update_banner_style(self, banner, colors, type_):
+        """Helper to update banner styles."""
+        bg = colors[f"banner_{type_}_bg"]
+        border = colors[f"banner_{type_}_border"]
+
+        # Apply style to the banner container
+        banner.setStyleSheet(f"""
+            QWidget {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 5px;
+            }}
+        """)
+
+        # Update dismiss button color
+        for btn in banner.findChildren(QPushButton):
+            if btn.text() == "×":
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: transparent;
+                        border: none;
+                        font-size: 20px;
+                        font-weight: bold;
+                        color: {colors['dismiss_btn']};
+                        padding: 0px 5px;
+                    }}
+                    QPushButton:hover {{
+                        color: {colors['dismiss_btn_hover']};
+                    }}
+                """)
+            # Ensure update/download buttons keep their specific styling if needed,
+            # but they usually have their own inline style.
+            # We should verify if apply_theme overwrites them.
+            # The banner.setStyleSheet might affect children if using QWidget selector without ID.
+            # The current implementation sets style on the banner widget itself.
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.PaletteChange:
+            self.apply_theme()
+        super().changeEvent(event)
+
     def init_ui(self):
         self.setWindowTitle("TextWave")
         self.setGeometry(100, 100, 700, 600)
 
         # Central widget
         central_widget = QWidget()
-        central_widget.setStyleSheet("background-color: #f0f0f0;")
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout()
         central_widget.setLayout(layout)
@@ -352,32 +481,15 @@ class PDF2MP3App(QMainWindow):
             layout.addWidget(logo_label)
 
         # Subtitle (logo already contains "TextWave" text)
-        subtitle_label = QLabel("Convert PDFs to MP3 Audio")
-        subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                color: #666;
-                padding-bottom: 15px;
-                padding-top: 5px;
-            }
-        """)
-        layout.addWidget(subtitle_label)
+        self.subtitle_label = QLabel("Convert PDFs to MP3 Audio")
+        self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.subtitle_label)
 
         # Drop area label
         self.drop_label = QLabel(
             "📄 Drag & Drop PDF Here\n\nor click 'Select PDF' below"
         )
         self.drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.drop_label.setStyleSheet("""
-            QLabel {
-                border: 3px dashed #00BCD4;
-                border-radius: 10px;
-                padding: 50px;
-                font-size: 18px;
-                background-color: #f5f5f5;
-            }
-        """)
         self.drop_label.setAcceptDrops(True)
         self.drop_label.dragEnterEvent = self.drag_enter_event
         self.drop_label.dropEvent = self.drop_event
@@ -433,16 +545,20 @@ class PDF2MP3App(QMainWindow):
         self.app_update_check_thread.finished.connect(self.app_update_check_complete)
         self.app_update_check_thread.start()
 
+        # Apply initial theme
+        self.apply_theme()
+
     def create_update_banner(self):
         """Create the update notification banner widget."""
+        colors = self.get_theme_colors()
         banner = QWidget()
-        banner.setStyleSheet("""
-            QWidget {
-                background-color: #E3F2FD;
-                border: 1px solid #00BCD4;
+        banner.setStyleSheet(f"""
+            QWidget {{
+                background-color: {colors['banner_update_bg']};
+                border: 1px solid {colors['banner_update_border']};
                 border-radius: 5px;
                 padding: 10px;
-            }
+            }}
         """)
 
         banner_layout = QHBoxLayout()
@@ -488,18 +604,18 @@ class PDF2MP3App(QMainWindow):
 
         # Dismiss button
         dismiss_btn = QPushButton("×")
-        dismiss_btn.setStyleSheet("""
-            QPushButton {
+        dismiss_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: transparent;
                 border: none;
                 font-size: 20px;
                 font-weight: bold;
-                color: #666;
+                color: {colors['dismiss_btn']};
                 padding: 0px 5px;
-            }
-            QPushButton:hover {
-                color: #000;
-            }
+            }}
+            QPushButton:hover {{
+                color: {colors['dismiss_btn_hover']};
+            }}
         """)
         dismiss_btn.clicked.connect(self.dismiss_update_banner)
         banner_layout.addWidget(dismiss_btn)
@@ -593,14 +709,15 @@ class PDF2MP3App(QMainWindow):
 
     def create_app_update_banner(self):
         """Create the app update notification banner widget."""
+        colors = self.get_theme_colors()
         banner = QWidget()
-        banner.setStyleSheet("""
-            QWidget {
-                background-color: #E8F5E9;
-                border: 1px solid #4CAF50;
+        banner.setStyleSheet(f"""
+            QWidget {{
+                background-color: {colors['banner_app_bg']};
+                border: 1px solid {colors['banner_app_border']};
                 border-radius: 5px;
                 padding: 10px;
-            }
+            }}
         """)
 
         banner_layout = QHBoxLayout()
@@ -643,18 +760,18 @@ class PDF2MP3App(QMainWindow):
 
         # Dismiss button
         dismiss_btn = QPushButton("×")
-        dismiss_btn.setStyleSheet("""
-            QPushButton {
+        dismiss_btn.setStyleSheet(f"""
+            QPushButton {{
                 background: transparent;
                 border: none;
                 font-size: 20px;
                 font-weight: bold;
-                color: #666;
+                color: {colors['dismiss_btn']};
                 padding: 0px 5px;
-            }
-            QPushButton:hover {
-                color: #000;
-            }
+            }}
+            QPushButton:hover {{
+                color: {colors['dismiss_btn_hover']};
+            }}
         """)
         dismiss_btn.clicked.connect(self.dismiss_app_update_banner)
         banner_layout.addWidget(dismiss_btn)
@@ -799,7 +916,7 @@ class PDF2MP3App(QMainWindow):
             if hasattr(self, "version_check_thread") and self.version_check_thread:
                 try:
                     self.version_check_thread.finished.disconnect()
-                except:
+                except Exception:
                     pass
                 if self.version_check_thread.isRunning():
                     self.version_check_thread.requestInterruption()
@@ -813,7 +930,7 @@ class PDF2MP3App(QMainWindow):
             ):
                 try:
                     self.app_update_check_thread.finished.disconnect()
-                except:
+                except Exception:
                     pass
                 if self.app_update_check_thread.isRunning():
                     self.app_update_check_thread.requestInterruption()
@@ -825,7 +942,7 @@ class PDF2MP3App(QMainWindow):
                 try:
                     self.update_thread.status.disconnect()
                     self.update_thread.finished.disconnect()
-                except:
+                except Exception:
                     pass
                 if self.update_thread.isRunning():
                     self.update_thread.requestInterruption()
