@@ -36,7 +36,7 @@ def get_resource_path(filename):
 try:
     import edge_tts
     from pypdf import PdfReader
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QEvent
     from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 
     try:
@@ -305,6 +305,7 @@ class ConversionThread(QThread):
 class PDF2MP3App(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("TextWave", "PDF2MP3")
         self.pdf_path = None
         self.update_banner = None
         self.update_dismissed = False
@@ -825,10 +826,17 @@ class PDF2MP3App(QMainWindow):
             self.set_pdf(files[0])
 
     def select_pdf(self):
+        # Get last input directory or default to Downloads
+        default_dir = self.settings.value(
+            "last_input_dir", str(Path.home() / "Downloads")
+        )
+
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select PDF File", "", "PDF Files (*.pdf)"
+            self, "Select PDF File", default_dir, "PDF Files (*.pdf)"
         )
         if file_path:
+            # Save the directory for next time
+            self.settings.setValue("last_input_dir", str(Path(file_path).parent))
             self.set_pdf(file_path)
 
     def set_pdf(self, path):
@@ -845,9 +853,12 @@ class PDF2MP3App(QMainWindow):
             return
 
         # Ask where to save
-        default_name = Path(self.pdf_path).stem + ".mp3"
+        # Default to the same folder as the input PDF
+        default_path = Path(self.pdf_path).parent / (
+            Path(self.pdf_path).stem + ".mp3"
+        )
         output_path, _ = QFileDialog.getSaveFileName(
-            self, "Save MP3 As", default_name, "MP3 Files (*.mp3)"
+            self, "Save MP3 As", str(default_path), "MP3 Files (*.mp3)"
         )
 
         if not output_path:
