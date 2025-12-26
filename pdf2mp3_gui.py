@@ -7,7 +7,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 
 def get_resource_path(filename):
