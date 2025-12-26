@@ -54,6 +54,15 @@ jobs:
           chmod +x .github/scripts/build-app.sh
           .github/scripts/build-app.sh
 
+      - name: Generate DMG background image
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          mkdir -p .github/assets
+          python3 .github/scripts/create-dmg-background.py
+          chmod +x .github/scripts/create-dmg-background.sh
+          .github/scripts/create-dmg-background.sh
+          ls -lh .github/assets/
+
       - name: Code sign and notarize app
         if: steps.check_tag.outputs.exists == 'false'
         env:
