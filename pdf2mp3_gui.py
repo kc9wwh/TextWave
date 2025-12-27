@@ -1,10 +1,16 @@
 import asyncio
+import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 __version__ = "0.6.2"
@@ -35,6 +41,7 @@ def get_resource_path(filename):
 # Auto-install dependencies if missing
 try:
     import edge_tts
+    from pydub import AudioSegment
     from pypdf import PdfReader
     from PyQt6.QtCore import QEvent, QSettings, Qt, QThread, pyqtSignal
     from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
@@ -47,13 +54,19 @@ try:
         SVG_AVAILABLE = False
     from PyQt6.QtWidgets import (
         QApplication,
+        QDialog,
+        QDialogButtonBox,
         QFileDialog,
+        QFormLayout,
+        QGroupBox,
         QHBoxLayout,
         QLabel,
         QMainWindow,
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QSlider,
+        QSpinBox,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -61,13 +74,160 @@ try:
 except ImportError as e:
     missing = str(e).split("'")[1] if "'" in str(e) else "dependencies"
     print("Installing required dependencies...")
-    packages = ["edge-tts", "pypdf", "PyQt6"]
+    packages = ["edge-tts", "pypdf", "PyQt6", "pydub"]
     subprocess.check_call([sys.executable, "-m", "pip", "install"] + packages)
     print("Dependencies installed. Please run the script again.\n")
     sys.exit(0)
 
 # Microsoft Azure Neural Voice (Free via edge-tts)
 VOICE = "en-US-AvaMultilingualNeural"
+
+
+def chunk_text_by_sentences(text, target_size=1000):
+    """
+    Split text into ~1000 char chunks at sentence boundaries.
+    Returns: List of (chunk_index, chunk_text) tuples
+    """
+    chunks = []
+    sentences = re.split(r"(?<=[.!?])\s+", text)  # Split on sentence boundaries
+
+    current_chunk = ""
+    chunk_index = 0
+
+    for sentence in sentences:
+        if len(current_chunk) + len(sentence) > target_size and current_chunk:
+            chunks.append((chunk_index, current_chunk.strip()))
+            chunk_index += 1
+            current_chunk = sentence
+        else:
+            current_chunk += " " + sentence
+
+    if current_chunk:  # Add final chunk
+        chunks.append((chunk_index, current_chunk.strip()))
+
+    return chunks
+
+
+class PreferencesDialog(QDialog):
+    """Dialog for configuring user preferences."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.settings = QSettings("TextWave", "PDF2MP3")
+        self.setWindowTitle("Preferences")
+        self.setModal(True)
+        self.setMinimumWidth(500)
+
+        self.init_ui()
+        self.load_preferences()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        # Performance Group
+        perf_group = QGroupBox("Performance Settings")
+        perf_layout = QFormLayout()
+
+        # Concurrent Workers
+        workers_layout = QHBoxLayout()
+        self.workers_slider = QSlider(Qt.Orientation.Horizontal)
+        self.workers_slider.setMinimum(1)
+        self.workers_slider.setMaximum(10)
+        self.workers_slider.setValue(3)
+        self.workers_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.workers_slider.setTickInterval(1)
+        self.workers_label = QLabel("3")
+        self.workers_slider.valueChanged.connect(
+            lambda v: self.workers_label.setText(str(v))
+        )
+        workers_layout.addWidget(self.workers_slider)
+        workers_layout.addWidget(self.workers_label)
+
+        perf_layout.addRow("Concurrent TTS Workers:", workers_layout)
+
+        # Max Retries
+        self.retries_spinbox = QSpinBox()
+        self.retries_spinbox.setMinimum(0)
+        self.retries_spinbox.setMaximum(10)
+        self.retries_spinbox.setValue(3)
+        perf_layout.addRow("Max Retries per Chunk:", self.retries_spinbox)
+
+        perf_group.setLayout(perf_layout)
+        layout.addWidget(perf_group)
+
+        # Storage Group
+        storage_group = QGroupBox("Storage Settings")
+        storage_layout = QFormLayout()
+
+        # Temp Folder
+        temp_layout = QHBoxLayout()
+        self.temp_folder_label = QLabel("System Default")
+        self.temp_folder_path = None
+        temp_browse_btn = QPushButton("Browse...")
+        temp_browse_btn.clicked.connect(self.browse_temp_folder)
+        temp_reset_btn = QPushButton("Reset")
+        temp_reset_btn.clicked.connect(self.reset_temp_folder)
+        temp_layout.addWidget(self.temp_folder_label, stretch=1)
+        temp_layout.addWidget(temp_browse_btn)
+        temp_layout.addWidget(temp_reset_btn)
+
+        storage_layout.addRow("Temporary Files Directory:", temp_layout)
+        storage_group.setLayout(storage_layout)
+        layout.addWidget(storage_group)
+
+        # Info Label
+        info_label = QLabel(
+            "ℹ️ Higher worker count = faster conversion but may hit API rate limits.\n"
+            "Retries help handle temporary network issues."
+        )
+        info_label.setStyleSheet("color: #666; font-size: 12px; padding: 10px;")
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        # Dialog Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.save_and_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.setLayout(layout)
+
+    def browse_temp_folder(self):
+        """Browse for temporary folder."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Temporary Files Directory"
+        )
+        if folder:
+            self.temp_folder_path = folder
+            self.temp_folder_label.setText(folder)
+
+    def reset_temp_folder(self):
+        """Reset temporary folder to system default."""
+        self.temp_folder_path = None
+        self.temp_folder_label.setText("System Default")
+
+    def load_preferences(self):
+        """Load preferences from QSettings."""
+        workers = self.settings.value("concurrent_workers", 3, type=int)
+        retries = self.settings.value("max_retries", 3, type=int)
+        temp_folder = self.settings.value("temp_folder", None)
+
+        self.workers_slider.setValue(workers)
+        self.workers_label.setText(str(workers))
+        self.retries_spinbox.setValue(retries)
+
+        if temp_folder:
+            self.temp_folder_path = temp_folder
+            self.temp_folder_label.setText(temp_folder)
+
+    def save_and_accept(self):
+        """Save preferences and close dialog."""
+        self.settings.setValue("concurrent_workers", self.workers_slider.value())
+        self.settings.setValue("max_retries", self.retries_spinbox.value())
+        self.settings.setValue("temp_folder", self.temp_folder_path)
+        self.accept()
 
 
 def extract_and_clean_text(pdf_path):
@@ -251,13 +411,184 @@ class ConversionThread(QThread):
     status = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, pdf_path, output_path):
+    def __init__(self, pdf_path, output_path, settings):
         super().__init__()
         self.pdf_path = pdf_path
         self.output_path = output_path
+        self.settings = settings
         self.caffeinate_process = None
+        self.paused = False
+        self.conversion_start_time = None
+
+        # Get user preferences
+        self.concurrent_workers = settings.value("concurrent_workers", 3, type=int)
+        self.max_retries = settings.value("max_retries", 3, type=int)
+        temp_folder = settings.value("temp_folder", None)
+        self.temp_base = temp_folder if temp_folder else tempfile.gettempdir()
+
+    def get_state_hash(self):
+        """Generate unique hash for this conversion."""
+        hash_input = f"{self.pdf_path}_{self.output_path}"
+        return hashlib.md5(hash_input.encode()).hexdigest()[:12]
+
+    def get_state_file_path(self):
+        """Get path to state file for this conversion."""
+        state_hash = self.get_state_hash()
+        return Path(self.temp_base) / f"textwave_state_{state_hash}.json"
+
+    def get_temp_dir(self):
+        """Get temporary directory for chunk files."""
+        state_hash = self.get_state_hash()
+        return Path(self.temp_base) / f"textwave_{state_hash}"
+
+    def load_state(self):
+        """Load existing state file if it exists."""
+        state_file = self.get_state_file_path()
+        if not state_file.exists():
+            return None
+
+        try:
+            with open(state_file, "r") as f:
+                state = json.load(f)
+
+            # Validate state matches current conversion
+            if state.get("pdf_path") != str(self.pdf_path):
+                return None
+            if state.get("output_path") != str(self.output_path):
+                return None
+
+            return state
+        except Exception as e:
+            self.status.emit(f"Warning: Could not load state file: {str(e)}")
+            return None
+
+    def save_state(self, state):
+        """Save conversion state to file."""
+        state_file = self.get_state_file_path()
+
+        try:
+            # Atomic write: write to temp file, then rename
+            temp_file = state_file.with_suffix(".tmp")
+            with open(temp_file, "w") as f:
+                json.dump(state, f, indent=2)
+            temp_file.replace(state_file)
+        except Exception as e:
+            self.status.emit(f"Warning: Could not save state: {str(e)}")
+
+    def cleanup_state(self, state):
+        """Clean up state file and temporary chunk files."""
+        try:
+            # Delete chunk files
+            temp_dir = Path(state.get("temp_dir", self.get_temp_dir()))
+            if temp_dir.exists():
+                for chunk_file in temp_dir.glob("chunk_*.mp3"):
+                    chunk_file.unlink()
+                temp_dir.rmdir()
+
+            # Delete state file
+            state_file = self.get_state_file_path()
+            if state_file.exists():
+                state_file.unlink()
+        except Exception as e:
+            self.status.emit(f"Warning: Could not cleanup temp files: {str(e)}")
+
+    def merge_chunks(self, chunk_files, output_path):
+        """Concatenate chunk MP3 files into final output."""
+        self.status.emit("Merging audio chunks...")
+
+        try:
+            # Load all chunks in order
+            segments = []
+            for i in sorted(chunk_files.keys(), key=int):
+                chunk_path = chunk_files[str(i)]
+                if not Path(chunk_path).exists():
+                    raise Exception(f"Chunk file missing: {chunk_path}")
+                segments.append(AudioSegment.from_mp3(chunk_path))
+
+            # Concatenate
+            if not segments:
+                raise Exception("No audio segments to merge")
+
+            final_audio = segments[0]
+            for segment in segments[1:]:
+                final_audio += segment
+
+            # Export
+            final_audio.export(output_path, format="mp3", bitrate="128k")
+
+            self.status.emit(f"Saved final MP3: {output_path}")
+        except Exception as e:
+            raise Exception(f"Failed to merge audio chunks: {str(e)}")
+
+    async def convert_chunk_async(self, chunk_idx, chunk_text, temp_dir):
+        """Convert single chunk to MP3 with retry logic (async)."""
+        output_file = temp_dir / f"chunk_{chunk_idx}.mp3"
+
+        for attempt in range(self.max_retries):
+            try:
+                communicate = edge_tts.Communicate(chunk_text, VOICE)
+                with open(output_file, "wb") as f:
+                    async for data_chunk in communicate.stream():
+                        if data_chunk["type"] == "audio":
+                            f.write(data_chunk["data"])
+
+                return {
+                    "chunk_idx": chunk_idx,
+                    "file": str(output_file),
+                    "success": True,
+                }
+
+            except Exception as e:
+                if attempt < self.max_retries - 1:
+                    # Exponential backoff: 1s, 2s, 4s, 8s...
+                    wait_time = 2**attempt
+                    self.status.emit(
+                        f"Chunk {chunk_idx} failed (attempt {attempt + 1}/{self.max_retries}), "
+                        f"retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    # Final failure
+                    self.status.emit(
+                        f"Chunk {chunk_idx} failed after {self.max_retries} attempts: {str(e)}"
+                    )
+                    return {
+                        "chunk_idx": chunk_idx,
+                        "file": None,
+                        "success": False,
+                        "error": str(e),
+                    }
+
+    def convert_chunk(self, chunk_idx, chunk_text, state):
+        """Wrapper to run async conversion in thread."""
+        temp_dir = Path(state["temp_dir"])
+        result = asyncio.run(self.convert_chunk_async(chunk_idx, chunk_text, temp_dir))
+
+        if result["success"]:
+            # Update progress
+            completed = len(state["completed_chunks"]) + 1
+            total = state["total_chunks"]
+            progress_pct = int((completed / total) * 100)
+
+            # Calculate ETA
+            if self.conversion_start_time:
+                elapsed = time.time() - self.conversion_start_time
+                if progress_pct > 0:
+                    total_time = elapsed / (progress_pct / 100)
+                    remaining = total_time - elapsed
+                    eta = f"ETA: {int(remaining // 60)}m {int(remaining % 60)}s"
+                    self.progress.emit(
+                        progress_pct, f"Chunk {completed}/{total} - {eta}"
+                    )
+                else:
+                    self.progress.emit(progress_pct, f"Chunk {completed}/{total}")
+            else:
+                self.progress.emit(progress_pct, f"Chunk {completed}/{total}")
+
+        return result
 
     def run(self):
+        state = None
         try:
             # Start caffeinate to prevent macOS sleep during conversion
             self.caffeinate_process = subprocess.Popen(
@@ -266,23 +597,117 @@ class ConversionThread(QThread):
                 stderr=subprocess.DEVNULL,
             )
 
-            # Extract text
-            self.status.emit("Extracting text from PDF...")
-            text, total_pages = extract_and_clean_text(self.pdf_path)
-            self.status.emit(
-                f"Extracted {len(text):,} characters from {total_pages} pages"
-            )
+            # Load existing state (if resuming)
+            state = self.load_state()
 
-            # Convert to speech
-            self.status.emit("Converting to speech...")
+            if state:
+                self.status.emit(
+                    f"Resuming conversion ({len(state['completed_chunks'])}/{state['total_chunks']} chunks completed)..."
+                )
+            else:
+                # Create new state
+                state = {
+                    "pdf_path": str(self.pdf_path),
+                    "output_path": str(self.output_path),
+                    "total_chunks": 0,
+                    "completed_chunks": [],
+                    "chunk_files": {},
+                    "paused": False,
+                    "created_at": datetime.now().isoformat(),
+                    "temp_dir": str(self.get_temp_dir()),
+                }
 
-            def progress_callback(percent, msg):
-                self.progress.emit(percent, msg)
+            # Extract text (skip if resuming with text in state)
+            if not state.get("full_text"):
+                self.status.emit("Extracting text from PDF...")
+                text, total_pages = extract_and_clean_text(self.pdf_path)
+                self.status.emit(
+                    f"Extracted {len(text):,} characters from {total_pages} pages"
+                )
+                state["full_text"] = text
+            else:
+                text = state["full_text"]
+                self.status.emit("Using cached extracted text...")
 
-            asyncio.run(text_to_speech_async(text, self.output_path, progress_callback))
+            # Create temp directory if needed
+            temp_dir = Path(state["temp_dir"])
+            temp_dir.mkdir(parents=True, exist_ok=True)
 
-            self.finished.emit(True, f"Successfully saved to:\n{self.output_path}")
+            # Chunk the text
+            if state["total_chunks"] == 0:
+                chunks = chunk_text_by_sentences(text)
+                state["total_chunks"] = len(chunks)
+                self.status.emit(f"Split into {len(chunks)} chunks for conversion")
+                self.save_state(state)
+            else:
+                chunks = chunk_text_by_sentences(text)
+
+            # Filter out completed chunks
+            pending_chunks = [
+                c for c in chunks if c[0] not in state["completed_chunks"]
+            ]
+
+            if not pending_chunks:
+                self.status.emit("All chunks already converted, merging...")
+            else:
+                # Convert chunks in parallel
+                self.status.emit(
+                    f"Converting {len(pending_chunks)} chunks using {self.concurrent_workers} workers..."
+                )
+
+                with ThreadPoolExecutor(
+                    max_workers=self.concurrent_workers
+                ) as executor:
+                    futures = {}
+
+                    # Submit all pending chunks
+                    for chunk_idx, chunk_text in pending_chunks:
+                        if self.paused:
+                            break
+                        future = executor.submit(
+                            self.convert_chunk, chunk_idx, chunk_text, state
+                        )
+                        futures[future] = chunk_idx
+
+                    # Process completed chunks
+                    failed_chunks = []
+                    for future in as_completed(futures):
+                        if self.paused:
+                            self.status.emit("Paused. Progress saved.")
+                            state["paused"] = True
+                            self.save_state(state)
+                            self.finished.emit(
+                                False, "Conversion paused. You can resume later."
+                            )
+                            return
+
+                        result = future.result()
+
+                        if result["success"]:
+                            # Mark chunk as completed
+                            state["completed_chunks"].append(result["chunk_idx"])
+                            state["chunk_files"][str(result["chunk_idx"])] = result[
+                                "file"
+                            ]
+                            self.save_state(state)
+                        else:
+                            failed_chunks.append(result["chunk_idx"])
+
+                    # Check for failures
+                    if failed_chunks:
+                        raise Exception(
+                            f"Failed to convert {len(failed_chunks)} chunks: {failed_chunks[:5]}..."
+                        )
+
+            # Merge all chunk MP3s into final output
+            if not self.paused:
+                self.merge_chunks(state["chunk_files"], self.output_path)
+                self.cleanup_state(state)
+                self.finished.emit(True, f"Successfully saved to:\n{self.output_path}")
+
         except Exception as e:
+            if state:
+                self.save_state(state)
             self.finished.emit(False, f"Error: {str(e)}")
         finally:
             # Always stop caffeinate when conversion completes or fails
@@ -317,6 +742,9 @@ class PDF2MP3App(QMainWindow):
         self.app_latest_version = ""
         self.app_download_url = ""
         self.init_ui()
+
+        # Check for orphaned conversions on startup
+        self.detect_orphaned_conversions()
 
     def get_theme_colors(self):
         """Get color palette based on system theme."""
@@ -454,6 +882,13 @@ class PDF2MP3App(QMainWindow):
         self.setWindowTitle("TextWave")
         self.setGeometry(100, 100, 700, 600)
 
+        # Menu Bar
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("File")
+
+        preferences_action = file_menu.addAction("Preferences...")
+        preferences_action.triggered.connect(self.show_preferences)
+
         # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -529,6 +964,27 @@ class PDF2MP3App(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
+
+        # Pause/Resume button
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        self.pause_btn.setVisible(False)  # Hidden until conversion starts
+        self.pause_btn.setStyleSheet("""
+            QPushButton {
+                padding: 10px;
+                font-size: 14px;
+                background-color: #FF9800;
+                color: white;
+                border-radius: 5px;
+            }
+            QPushButton:hover:enabled {
+                background-color: #F57C00;
+            }
+            QPushButton:disabled {
+                background-color: #cccccc;
+            }
+        """)
+        layout.addWidget(self.pause_btn)
 
         # Status text
         self.status_text = QTextEdit()
@@ -827,6 +1283,105 @@ class PDF2MP3App(QMainWindow):
         if files and files[0].lower().endswith(".pdf"):
             self.set_pdf(files[0])
 
+    def detect_orphaned_conversions(self):
+        """Detect incomplete conversions and prompt user to resume."""
+        temp_folder = self.settings.value("temp_folder", None)
+        temp_base = temp_folder if temp_folder else tempfile.gettempdir()
+        temp_dir = Path(temp_base)
+
+        # Find all state files
+        state_files = list(temp_dir.glob("textwave_state_*.json"))
+
+        if not state_files:
+            return
+
+        # Check each state file
+        for state_file in state_files:
+            try:
+                # Check if file is old enough (>5 min = likely orphaned)
+                file_age = time.time() - state_file.stat().st_mtime
+                if file_age < 300:  # Skip recent files (< 5 min)
+                    continue
+
+                # Load state
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+
+                pdf_path = state.get("pdf_path")
+                output_path = state.get("output_path")
+                completed = len(state.get("completed_chunks", []))
+                total = state.get("total_chunks", 0)
+
+                if total == 0:
+                    continue
+
+                percentage = int((completed / total) * 100)
+
+                # Prompt user to resume
+                response = QMessageBox.question(
+                    self,
+                    "Resume Conversion?",
+                    f"Found incomplete conversion:\n\n"
+                    f"PDF: {Path(pdf_path).name}\n"
+                    f"Progress: {completed}/{total} chunks ({percentage}%)\n\n"
+                    f"Would you like to resume this conversion?",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Ignore,
+                )
+
+                if response == QMessageBox.StandardButton.Yes:
+                    # Resume conversion
+                    self.pdf_path = pdf_path
+                    self.set_pdf(pdf_path)
+                    # Auto-start conversion with same output path
+                    self.auto_resume_conversion(output_path)
+                    break  # Only handle one at a time
+                elif response == QMessageBox.StandardButton.No:
+                    # Delete state file
+                    state_file.unlink()
+                    # Clean up temp dir
+                    temp_conv_dir = Path(state.get("temp_dir"))
+                    if temp_conv_dir.exists():
+                        for chunk_file in temp_conv_dir.glob("chunk_*.mp3"):
+                            chunk_file.unlink()
+                        temp_conv_dir.rmdir()
+                # Ignore means leave it for later
+
+            except Exception as e:
+                # Skip corrupted state files
+                continue
+
+    def auto_resume_conversion(self, output_path):
+        """Automatically resume a conversion without asking for output path."""
+        if not self.pdf_path:
+            return
+
+        # Disable UI during conversion
+        self.convert_btn.setEnabled(False)
+        self.select_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.pause_btn.setVisible(True)
+        self.pause_btn.setEnabled(True)
+        self.pause_btn.setText("Pause")
+        self.status_text.setVisible(True)
+        self.status_text.clear()
+
+        # Start conversion thread
+        self.thread = ConversionThread(self.pdf_path, output_path, self.settings)
+        self.thread.progress.connect(self.update_progress)
+        self.thread.status.connect(self.update_status)
+        self.thread.finished.connect(self.conversion_finished)
+        self.conversion_start_time = time.time()
+        self.thread.conversion_start_time = self.conversion_start_time
+        self.thread.start()
+
+    def show_preferences(self):
+        """Show the preferences dialog."""
+        dialog = PreferencesDialog(self)
+        dialog.exec()
+
     def select_pdf(self):
         # Get last input directory or default to Downloads
         default_dir = self.settings.value(
@@ -849,6 +1404,21 @@ class PDF2MP3App(QMainWindow):
         self.status_text.clear()
         self.status_text.setVisible(False)
         self.progress_bar.setVisible(False)
+
+    def toggle_pause(self):
+        """Toggle pause/resume for the conversion."""
+        if hasattr(self, "thread") and self.thread.isRunning():
+            if self.thread.paused:
+                # Resume
+                self.thread.paused = False
+                self.pause_btn.setText("Pause")
+                self.status_text.append("⏯️ Resuming conversion...")
+            else:
+                # Pause
+                self.thread.paused = True
+                self.pause_btn.setText("Resuming...")
+                self.pause_btn.setEnabled(False)  # Disable until pause completes
+                self.status_text.append("⏸️ Pausing after current chunk...")
 
     def convert(self):
         if not self.pdf_path:
@@ -879,14 +1449,19 @@ class PDF2MP3App(QMainWindow):
         self.select_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        self.pause_btn.setVisible(True)  # Show pause button
+        self.pause_btn.setEnabled(True)
+        self.pause_btn.setText("Pause")
         self.status_text.setVisible(True)
         self.status_text.clear()
 
         # Start conversion thread
-        self.thread = ConversionThread(self.pdf_path, output_path)
+        self.thread = ConversionThread(self.pdf_path, output_path, self.settings)
         self.thread.progress.connect(self.update_progress)
         self.thread.status.connect(self.update_status)
         self.thread.finished.connect(self.conversion_finished)
+        self.conversion_start_time = time.time()
+        self.thread.conversion_start_time = self.conversion_start_time
         self.thread.start()
 
     def update_progress(self, value, message):
@@ -900,6 +1475,7 @@ class PDF2MP3App(QMainWindow):
         self.status_text.append("\n" + message)
         self.convert_btn.setEnabled(True)
         self.select_btn.setEnabled(True)
+        self.pause_btn.setVisible(False)  # Hide pause button when done
 
         if success:
             self.progress_bar.setValue(100)
