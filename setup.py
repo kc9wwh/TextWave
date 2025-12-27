@@ -28,7 +28,7 @@ icon_file = "textwave.icns" if os.path.exists("textwave.icns") else None
 
 OPTIONS = {
     "argv_emulation": False,
-    "packages": ["edge_tts", "pypdf", "PyQt6"],
+    "packages": ["edge_tts", "pypdf", "PyQt6", "PIL"],
     "iconfile": icon_file,
     "plist": {
         "CFBundleName": "TextWave",
